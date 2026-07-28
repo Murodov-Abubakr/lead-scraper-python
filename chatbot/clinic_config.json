@@ -1,0 +1,35 @@
+{
+  "clinic_name": "Smile Dental Care",
+  "doctor_name": "Dr. Sarah Johnson",
+  "phone": "(210) 555-0123",
+  "address": "1234 Main Street, San Antonio, TX 78201",
+  "email": "info@smiledentalcare.com",
+  "owner_email": "dr.johnson@smiledentalcare.com",
+  "hours": {
+    "monday":    "8:00 AM - 5:00 PM",
+    "tuesday":   "8:00 AM - 5:00 PM",
+    "wednesday": "8:00 AM - 6:00 PM",
+    "thursday":  "8:00 AM - 5:00 PM",
+    "friday":    "8:00 AM - 3:00 PM",
+    "saturday":  "9:00 AM - 1:00 PM",
+    "sunday":    "Closed"
+  },
+  "services": [
+    "General Dentistry",
+    "Teeth Cleaning",
+    "Teeth Whitening",
+    "Dental Implants",
+    "Invisalign",
+    "Emergency Dental Care",
+    "Root Canal",
+    "Crowns & Bridges",
+    "Pediatric Dentistry"
+  ],
+  "insurance": [
+    "Delta Dental", "Cigna", "Aetna", "MetLife",
+    "United Healthcare", "BlueCross BlueShield", "Humana"
+  ],
+  "widget_color": "#2563eb",
+  "welcome_message": "Hi! I'm the AI assistant for Smile Dental Care. I can help you book an appointment or answer any questions. How can I help you today?",
+  "after_hours_message": "Our office is currently closed, but I can still book your appointment! Leave your details and Dr. Johnson's team will confirm first thing in the morning."
+}

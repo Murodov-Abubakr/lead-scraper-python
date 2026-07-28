@@ -1,0 +1,33 @@
+# Secret keys - NEVER push these
+.env
+
+# Data files with personal info
+outreach_sent.json
+outreach_sent_backup*.json
+email_sequence.json
+dental_leads.csv
+qualified_leads.csv
+agencies.csv
+results*.csv
+stores.csv
+hiring_signals.csv
+
+# Log files
+*.txt
+*.log
+
+# Screenshots folder (large files)
+screenshots/
+
+# Media files
+*.mp3
+*.mp4
+videos/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# WebDriver cache
+.wdm/
