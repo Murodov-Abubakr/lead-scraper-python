@@ -28,10 +28,23 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── Gemini client (optional — falls back to templates if key missing) ──
+_gemini_client = None
+try:
+    from google import genai
+    from google.genai import types as _genai_types
+    _gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if _gemini_api_key:
+        _gemini_client = genai.Client(api_key=_gemini_api_key)
+except ImportError:
+    pass
 
 # ═══════════════════════════════════════════════════════════════════
 # CONFIG
@@ -379,7 +392,7 @@ def take_annotated_screenshot(url, problems, output_path):
     ctaText.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
     ctaText.innerHTML = [
         '<span style="color:#f9fafb;font-size:13px;font-weight:700;letter-spacing:0.3px;line-height:1;">I can fix all ' + numProbs + ' of these — reply to this email to get started</span>',
-        '<span style="color:#4b5563;font-size:11px;font-weight:500;line-height:1;">Sent by ' + yourName + ' · I specialize exclusively in dental practice websites</span>'
+        '<span style="color:#4b5563;font-size:11px;font-weight:500;line-height:1;">Sent by ' + yourName + '</span>'
     ].join('');
     cta.appendChild(ctaText);
 
@@ -408,132 +421,278 @@ def take_annotated_screenshot(url, problems, output_path):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# EMAIL GENERATOR
+# EMAIL GENERATOR — AI-powered (Gemini) with template fallback
 # ═══════════════════════════════════════════════════════════════════
 
-PROBLEM_MAP = {
+_PROBLEM_LABELS = {
     "no_website":        "no website at all",
-    "no_https":          "no HTTPS security — browsers show a red 'Not Secure' warning",
-    "no_mobile_support": "not mobile-friendly — broken on phones",
+    "no_https":          "no HTTPS — browsers show 'Not Secure'",
+    "no_mobile_support": "not mobile-friendly",
     "no_online_booking": "no way to book appointments online",
     "no_ai_chatbot":     "no live chat or AI assistant",
-    "uses_zocdoc":       "paying per patient via Zocdoc instead of owning your own booking",
+    "uses_zocdoc":       "paying per patient via Zocdoc",
 }
 
-def _pick_service(problems):
-    """Three offers only: build, replace_zocdoc, chatbot."""
-    if "no_website" in problems:
-        return "build", "build you a professional dental website — mobile-friendly, Google-optimized, with AI booking built in so patients can request appointments 24/7"
-    if "uses_zocdoc" in problems:
-        return "replace_zocdoc", "replace Zocdoc with your own AI booking system — you keep 100% of every patient, no per-booking fees ever"
-    return "chatbot", "add an AI booking assistant to your site so patients can book appointments 24/7 without calling the office"
+def _readable_problems(problems):
+    out = []
+    for p in problems:
+        for key, label in _PROBLEM_LABELS.items():
+            if p.startswith(key):
+                out.append(label)
+                break
+        else:
+            if p.startswith("slow_site_"):
+                out.append(f"mobile speed score {p.split('_')[-1]}/100")
+            elif p.startswith("bad_seo_"):
+                out.append(f"SEO score {p.split('_')[-1]}/100 — hard to find on Google")
+            elif p.startswith("old_design_"):
+                out.append(f"site last updated {p.split('_')[-1]}")
+    return out
 
 
-SUBJECTS = [
-    "Noticed something on {name}'s website",
-    "Quick question for {name}",
-    "{name} — patients searching online may not be finding you",
-    "Looked at {name}'s website today",
-    "Something worth knowing about {name}'s online presence",
-]
+def _generate_email_ai(lead) -> tuple[str, str] | None:
+    """Ask Gemini to write a unique cold email. Returns (subject, body) or None on failure."""
+    if not _gemini_client:
+        return None
 
-POSITIVES = [
-    "Your practice has solid reviews in {city} — that tells me you deliver great care.",
-    "I can see {name} has been serving patients in {city} — that kind of reputation takes real work.",
-    "Dental practices with consistent reviews like yours clearly focus on patient experience.",
-    "Strong local presence in {city} — your patients clearly trust you.",
-]
-
-COMPETITOR_FRAMES = [
-    "The challenge is that most dental practices in {city} now have online booking — patients searching at 9pm will book with whoever makes it easiest.",
-    "I checked several practices near you in {city} and the ones getting the most new patients all have one thing in common: patients can book without calling.",
-    "Most patients in {city} now decide on a dentist before they ever pick up the phone. What they see on your website determines if they call you or your competitor.",
-    "In {city} right now, the dental practices growing fastest are the ones that let patients self-serve online — booking, questions, everything.",
-]
-
-CLOSERS = [
-    "Reply 'yes' and I'll send you a short breakdown of exactly what I'd do for {name} — no call needed.",
-    "If you want I can record a 2-minute video showing exactly what I'd fix on your site — just say the word.",
-    "One reply and I can have a specific plan over to you by tomorrow.",
-    "Worth a look? Reply and I'll send the fix breakdown — takes 30 seconds to read.",
-]
-
-
-def generate_email(lead):
     name     = lead["business_name"]
-    city     = lead.get("city", "your area").replace(" TX", ", TX").replace(" FL", ", FL")
-    problems = [p.strip() for p in lead.get("problems", "").split("|") if p.strip()]
+    city     = lead.get("city", "your area")
     rating   = lead.get("rating", "")
+    reviews  = lead.get("reviews", "")
+    problems = [p.strip() for p in lead.get("problems", "").split("|") if p.strip()]
+    readable = _readable_problems(problems)
 
-    service_type, service_pitch = _pick_service(problems)
+    try:
+        stars = float(rating)
+        rating_line = f"{rating} stars on Google ({reviews} reviews)" if reviews else f"{rating} stars on Google"
+    except (ValueError, TypeError):
+        rating_line = ""
 
-    positive   = random.choice(POSITIVES).format(name=name, city=city)
-    comp_frame = random.choice(COMPETITOR_FRAMES).format(name=name, city=city)
-    closer     = random.choice(CLOSERS).format(name=name)
+    prompt = f"""You are writing a cold outreach email for {YOUR_NAME}, a web developer selling an AI booking chatbot to dental clinics.
 
-    subjects = {
-        "build":          f"couldn't find {name} online",
-        "replace_zocdoc": f"Zocdoc alternative for {name}",
-        "chatbot":        f"question about {name}",
-    }
-    subject = subjects.get(service_type, f"question about {name}")
+Target:
+- Business: {name}
+- City: {city}
+- Google rating: {rating_line or "not available"}
+- Problems found on their website: {', '.join(readable) if readable else 'general website issues'}
 
-    specialist = "I specialize exclusively in dental practices — I know exactly what patients look for when choosing a dentist online."
+Service being offered: an AI chatbot that lets patients book appointments 24/7, answers questions after hours, and is embedded on their website in under a week.
 
-    # Zocdoc-specific email (strongest argument — saves them real money)
-    if service_type == "replace_zocdoc":
-        body = f"""Hi,
+Write a short, direct cold email. Rules:
+- Subject: specific and curiosity-driven, under 8 words, no clickbait
+- Body: exactly 4-5 sentences, no more
+- Mention 1 or 2 of the specific problems listed above (the worst ones)
+- One clear call to action — ask for a reply, not a call
+- No "I hope this finds you well", no "I wanted to reach out", no em dashes overuse
+- Sound like a real person, not a marketing department
+- Sign off: just "{YOUR_NAME}" on its own line
 
-{positive}
+Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
 
-I ran a quick audit and found {len(problems)} issue{'s' if len(problems) != 1 else ''} on your site — all marked in the screenshot. The most costly one: you're using Zocdoc.
+    resp = _gemini_client.models.generate_content(
+        model="gemini-2.0-flash-lite",
+        contents=prompt,
+        config=_genai_types.GenerateContentConfig(max_output_tokens=400, temperature=0.9),
+    )
+    raw = resp.text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    data = json.loads(raw)
+    subject = data.get("subject", "").strip()
+    body    = data.get("body", "").strip()
+    if subject and body:
+        return subject, body
+    return None
 
-Zocdoc charges $30–$80 per new patient. For a busy practice that's hundreds every month going out the door permanently.
 
-I build AI booking systems for dental practices that do everything Zocdoc does — appointment requests, patient intake, FAQ — but you own it. Flat monthly fee, no per-patient charges ever.
+def _generate_email_template(lead) -> tuple[str, str]:
+    """Fallback template email when Gemini is unavailable."""
+    name     = lead["business_name"]
+    city     = lead.get("city", "your area")
+    problems = [p.strip() for p in lead.get("problems", "").split("|") if p.strip()]
+    readable = _readable_problems(problems)
 
-{specialist}
-
-{closer}
-
-{YOUR_NAME}"""
-
-    elif service_type == "build":
-        body = f"""Hi,
-
-I was searching for a dentist in {city} and couldn't find a website for {name}.
-
-{comp_frame}
-
-Without a website you're invisible to anyone searching online. I build professional dental websites in 7 days — optimized for Google, mobile-friendly, with an AI booking assistant built in so patients can request appointments 24/7.
-
-{specialist}
-
-{closer}
-
-{YOUR_NAME}"""
-
+    if "no_website" in problems:
+        subject = f"couldn't find {name} online"
+        body = (f"Hi,\n\n{name} has no website, which means patients searching online can't find you.\n\n"
+                f"I build dental websites in 7 days with AI booking built in.\n\n"
+                f"Worth a quick look? Reply and I'll send details.\n\n{YOUR_NAME}")
+    elif any("zocdoc" in p for p in problems):
+        subject = f"Zocdoc alternative for {name}"
+        body = (f"Hi,\n\nYou're paying Zocdoc per patient — I replace that with your own AI booking system "
+                f"for a flat monthly fee. No per-patient charges.\n\n"
+                f"Reply and I'll send a breakdown.\n\n{YOUR_NAME}")
     else:
-        issues_line = (
-            f"I ran a quick audit and found {len(problems)} issue{'s' if len(problems) != 1 else ''} on your site — all marked in the screenshot."
-            if len(problems) > 1 else
-            "I ran a quick audit and found an issue on your site — marked in the screenshot."
-        )
-        body = f"""Hi,
-
-{positive}
-
-{comp_frame}
-
-{issues_line} The biggest one: I can {service_pitch}.
-
-{specialist}
-
-{closer}
-
-{YOUR_NAME}"""
-
+        top = readable[0] if readable else "no online booking"
+        subject = f"question about {name}"
+        body = (f"Hi,\n\nI looked at {name}'s website and noticed {top}. "
+                f"Patients who can't book online go to whoever makes it easiest.\n\n"
+                f"I add an AI booking assistant to dental sites in about a week. "
+                f"Reply if you want to see how it works.\n\n{YOUR_NAME}")
     return subject, body
+
+
+def generate_email(lead) -> tuple[str, str]:
+    """Generate email — tries Gemini first, falls back to template."""
+    try:
+        result = _generate_email_ai(lead)
+        if result:
+            return result
+    except Exception as e:
+        log.warning("AI email generation failed (%s) — using template", e)
+    return _generate_email_template(lead)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AI-GUIDED EMAIL EXTRACTION
+# ═══════════════════════════════════════════════════════════════════
+
+_EMAIL_RE_EXTRACT = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    re.IGNORECASE,
+)
+_BAD_EMAIL_WORDS = {
+    "noreply", "no-reply", "privacy", "legal", "sentry", "example",
+    "schema", "jquery", "w3.org", "google", "wix.com", "wordpress",
+    "first.last", "name@email", "email@email", "user@domain",
+    "test@", "your@", "@example", "@domain",
+}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+
+
+def _is_real_email(addr: str) -> bool:
+    domain = addr.split("@")[-1].lower()
+    if any(domain.endswith(ext) for ext in _IMAGE_EXTS):
+        return False
+    if not domain[0].isalpha():
+        return False
+    if "." not in domain or len(domain) < 5:
+        return False
+    if any(bad in addr.lower() for bad in _BAD_EMAIL_WORDS):
+        return False
+    return True
+
+
+def _emails_from_html(html: str) -> list[str]:
+    """Extract real emails from raw HTML — catches mailto: and plain text."""
+    found = set()
+    for match in re.finditer(r'mailto:([^"\'>\s?&#]+)', html):
+        addr = match.group(1).lower().strip(".")
+        if _is_real_email(addr):
+            found.add(addr)
+    for addr in _EMAIL_RE_EXTRACT.findall(html):
+        if _is_real_email(addr.lower()):
+            found.add(addr.lower())
+    return list(found)
+
+
+def _rank_email(addr: str) -> int:
+    """Lower = better. Prefer appointment/contact/info addresses."""
+    for i, kw in enumerate(["appt", "appo", "dental", "contact", "info", "office", "hello", "admin", "dr"]):
+        if kw in addr:
+            return i
+    return 99
+
+
+def _ai_pick_contact_pages(homepage_html: str, links: list, base_url: str) -> list[str]:
+    """Ask Gemini which pages are most likely to have a contact email."""
+    if not _gemini_client or not links:
+        return []
+    link_list = "\n".join(
+        f'{i+1}. [{l["text"] or ""}] {l["url"]}'
+        for i, l in enumerate(links[:50])
+    )
+    prompt = f"""You are finding the contact email for a dental clinic website: {base_url}
+
+Links found on their homepage:
+{link_list}
+
+Which 3 links are most likely to contain a contact email address?
+Think: About Us, Our Team, Meet the Doctor, Contact, Staff, Appointment pages.
+
+Return ONLY a JSON array of the URLs: ["url1", "url2", "url3"]"""
+
+    try:
+        resp = _gemini_client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=prompt,
+            config=_genai_types.GenerateContentConfig(max_output_tokens=200),
+        )
+        raw = resp.text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        chosen = json.loads(raw)
+        return [u for u in chosen if isinstance(u, str)][:3]
+    except Exception:
+        return []
+
+
+def _get_links(html: str, base_url: str) -> list[dict]:
+    """Extract all internal links from homepage HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    base_netloc = urlparse(base_url).netloc
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        abs_href = urljoin(base_url, href).split("#")[0].split("?")[0]
+        parsed = urlparse(abs_href)
+        if parsed.netloc == base_netloc and abs_href != base_url:
+            links.append({"url": abs_href, "text": a.get_text(strip=True)[:60]})
+    seen = set()
+    deduped = []
+    for l in links:
+        if l["url"] not in seen:
+            seen.add(l["url"])
+            deduped.append(l)
+    return deduped
+
+
+def _scrape_email_from_site(website: str) -> str:
+    """
+    AI-guided email extraction:
+    1. Fetch homepage, collect all internal links
+    2. Ask Gemini which 3 pages most likely have a contact email
+    3. Scrape those pages for emails with regex
+    Falls back to contact/about heuristic if Gemini unavailable.
+    """
+    if not website:
+        return ""
+    base = website.rstrip("/")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    # Fetch homepage
+    try:
+        resp = requests.get(base, headers=headers, timeout=10, allow_redirects=True)
+        homepage_html = resp.text
+    except Exception:
+        return ""
+
+    # Check homepage itself first (fastest path)
+    found = _emails_from_html(homepage_html)
+    if found:
+        return sorted(found, key=_rank_email)[0]
+
+    links = _get_links(homepage_html, base)
+
+    # AI picks which pages to check
+    pages_to_check = _ai_pick_contact_pages(homepage_html[:4000], links, base)
+
+    # Fallback: keyword-based heuristic when no AI
+    if not pages_to_check:
+        kw = ["contact", "about", "team", "doctor", "staff", "appointment"]
+        pages_to_check = [
+            l["url"] for l in links
+            if any(k in l["url"].lower() for k in kw)
+        ][:4]
+
+    for url in pages_to_check:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            found = _emails_from_html(r.text)
+            if found:
+                best = sorted(found, key=_rank_email)[0]
+                log.info("    Email found on %s: %s", url.split("/")[-1] or url, best)
+                return best
+        except Exception:
+            continue
+
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -678,32 +837,6 @@ def scrape_leads(target=1000):
 # EMAIL ENRICHMENT (Hunter.io)
 # ═══════════════════════════════════════════════════════════════════
 
-EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-_BAD_EMAIL_WORDS = {"noreply", "no-reply", "privacy", "legal", "sentry", "example",
-                    "schema", "jquery", "w3.org", "google", "wix.com", "wordpress",
-                    "first.last", "name@email", "email@email", "user@domain",
-                    "test@email", "test@test", "your@email", "info@example"}
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
-
-
-def _is_real_email(email):
-    """Filter out image filenames, placeholders, and obviously fake addresses."""
-    domain = email.split("@")[-1].lower()
-    # Image file extensions in domain (e.g. flags@2x.png, image@2x-300x300.jpg)
-    if any(domain.endswith(ext) for ext in _IMAGE_EXTS):
-        return False
-    # Domain starts with digit (e.g. @2x-1024x609, @300x)
-    if domain[0].isdigit():
-        return False
-    # Domain has no dot or is too short
-    if "." not in domain or len(domain) < 4:
-        return False
-    # Placeholder patterns
-    if any(bad in email.lower() for bad in _BAD_EMAIL_WORDS):
-        return False
-    return True
-
-
 def _domain(website):
     return website.replace("https://", "").replace("http://", "").split("/")[0].lstrip("www.")
 
@@ -730,38 +863,6 @@ def _hunter_email(website):
         return ""
 
 
-def _scrape_email_from_site(website):
-    if not website:
-        return ""
-    base = website.rstrip("/")
-    pages = [base, base + "/contact", base + "/contact-us",
-             base + "/about", base + "/about-us"]
-    found = set()
-    for url in pages:
-        try:
-            r = requests.get(url, timeout=8,
-                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            # mailto: links first — most reliable
-            for match in re.finditer(r'mailto:([^"\'>\s?&#]+)', r.text):
-                email = match.group(1).lower().strip(".")
-                if _is_real_email(email):
-                    found.add(email)
-            # General email pattern in body
-            for email in EMAIL_RE.findall(r.text):
-                if _is_real_email(email.lower()):
-                    found.add(email.lower())
-        except Exception:
-            continue
-        if found:
-            break
-
-    if not found:
-        return ""
-    for priority in ["appt", "appo", "dental", "contact", "info", "office", "hello", "admin"]:
-        for e in found:
-            if priority in e:
-                return e
-    return sorted(found)[0]
 
 
 def _apollo_email(website):
