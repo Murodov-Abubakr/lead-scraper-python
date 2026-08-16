@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Vicere</title>
+<style>
+  :root {
+    --bg:       #0c0e1a;
+    --surface:  #12172b;
+    --border:   #1e2540;
+    --text:     #e8eaf6;
+    --muted:    #6b7394;
+    --accent:   #7c8cf8;
+    --accent2:  #a78bfa;
+    --green:    #4ade80;
+    --yellow:   #fbbf24;
+    --red:      #f87171;
+    --orange:   #fb923c;
+    --safe-t:   env(safe-area-inset-top, 0px);
+    --safe-b:   env(safe-area-inset-bottom, 0px);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-size: 14px;
+  }
+
+  /* ── Top bar ─────────────────────────────────────────────── */
+  #topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: calc(var(--safe-t) + 12px) 16px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #topbar h1 {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--accent);
+  }
+  #topbar-right { display: flex; gap: 8px; }
+  .icon-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 20px;
+    padding: 4px 8px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: color .15s;
+  }
+  .icon-btn:active { color: var(--accent); }
+
+  /* ── Content area ────────────────────────────────────────── */
+  #content {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .page { display: none; padding: 16px; padding-bottom: calc(80px + var(--safe-b)); }
+  .page.active { display: block; }
+
+  /* ── Bottom nav ──────────────────────────────────────────── */
+  #bottomnav {
+    display: flex;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding-bottom: var(--safe-b);
+    flex-shrink: 0;
+  }
+  .nav-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 0;
+    gap: 3px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: .5px;
+    border: none;
+    background: none;
+    transition: color .15s;
+  }
+  .nav-tab .icon { font-size: 22px; }
+  .nav-tab.active { color: var(--accent); }
+
+  /* ── Cards ───────────────────────────────────────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  /* ── Stat grid ───────────────────────────────────────────── */
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 12px;
+  }
+  .stat-label { font-size: 10px; color: var(--muted); letter-spacing: .5px; margin-bottom: 6px; }
+  .stat-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat-value.accent  { color: var(--accent); }
+  .stat-value.green   { color: var(--green); }
+  .stat-value.yellow  { color: var(--yellow); }
+  .stat-value.muted   { color: var(--muted); }
+
+  /* ── Lead list ───────────────────────────────────────────── */
+  .search-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .search-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+  }
+  .search-input::placeholder { color: var(--muted); }
+  .search-input:focus { border-color: var(--accent); }
+
+  .filter-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: none;
+  }
+  .filter-row::-webkit-scrollbar { display: none; }
+  .pill {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    flex-shrink: 0;
+    transition: all .15s;
+  }
+  .pill.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .lead-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+  }
+  .lead-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .lead-name { font-weight: 600; font-size: 14px; flex: 1; }
+  .stage-badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .4px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+  }
+  .stage-scraped    { background: #1e2540; color: var(--muted); }
+  .stage-emailed    { background: #1a2d4a; color: #60a5fa; }
+  .stage-followed_up { background: #1f2d1a; color: var(--green); }
+  .stage-no_email   { background: #2d1f1a; color: var(--orange); }
+  .stage-replied    { background: #1f2d1a; color: #86efac; }
+  .stage-onboarded  { background: #1a2d24; color: var(--green); }
+  .stage-failed     { background: #2d1a1a; color: var(--red); }
+
+  .lead-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .lead-meta span + span::before { content: " · "; }
+  .lead-email { font-size: 12px; color: var(--accent2); margin-top: 4px; word-break: break-all; }
+
+  .lead-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .act-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .act-btn:active { transform: scale(.96); }
+  .act-btn.replied   { border-color: #4ade8060; color: var(--green); }
+  .act-btn.onboarded { border-color: #7c8cf860; color: var(--accent); }
+  .act-btn.undo      { border-color: var(--border); color: var(--muted); }
+
+  .lead-count {
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    padding: 8px;
+    margin-bottom: 4px;
+  }
+
+  /* ── Pipeline ────────────────────────────────────────────── */
+  .pipeline-stage {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .pipeline-icon { font-size: 22px; flex-shrink: 0; }
+  .pipeline-label { font-weight: 600; font-size: 14px; }
+  .pipeline-sub   { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .pipeline-count {
+    margin-left: auto;
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  .pipeline-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 12px;
+    overflow: hidden;
+  }
+  .pipeline-fill { height: 100%; border-radius: 2px; transition: width .4s ease; }
+
+  /* ── Settings ────────────────────────────────────────────── */
+  #settings-overlay {
+    position: fixed;
+    inset: 0;
+    background: #000a;
+    z-index: 100;
+    display: flex;
+    align-items: flex-end;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+  }
+  #settings-overlay.open { opacity: 1; pointer-events: all; }
+  #settings-sheet {
+    width: 100%;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-radius: 20px 20px 0 0;
+    padding: 24px 20px calc(24px + var(--safe-b));
+    transform: translateY(100%);
+    transition: transform .25s ease;
+  }
+  #settings-overlay.open #settings-sheet { transform: translateY(0); }
+  .sheet-title {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    text-align: center;
+  }
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+  }
+  .field-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 14px;
+    outline: none;
+  }
+  .field-input:focus { border-color: var(--accent); }
+  .btn-primary {
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+    transition: opacity .15s;
+  }
+  .btn-primary:active { opacity: .8; }
+
+  /* ── Empty / loading states ──────────────────────────────── */
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 40px 20px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .spinner {
+    display: inline-block;
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    margin: 0 auto 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .toast {
+    position: fixed;
+    bottom: calc(70px + var(--safe-b));
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    background: #1e2540;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 8px 18px;
+    font-size: 13px;
+    color: var(--text);
+    opacity: 0;
+    transition: all .25s;
+    pointer-events: none;
+    z-index: 200;
+    white-space: nowrap;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div id="topbar">
+  <h1>VICERE</h1>
+  <div id="topbar-right">
+    <button class="icon-btn" onclick="refresh()" title="Refresh">↻</button>
+    <button class="icon-btn" onclick="openSettings()" title="Settings">⚙</button>
+  </div>
+</div>
+
+<!-- Content -->
+<div id="content">
+
+  <!-- Overview page -->
+  <div id="page-overview" class="page active">
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">TOTAL LEADS</div>
+        <div class="stat-value accent" id="s-total">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">EMAILED</div>
+        <div class="stat-value accent" id="s-emailed">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">REPLIED</div>
+        <div class="stat-value green" id="s-replied">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">ONBOARDED</div>
+        <div class="stat-value green" id="s-onboarded">—</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Pipeline breakdown</div>
+      <div id="breakdown-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Hot leads (score ≥ 8)</div>
+      <div id="hot-leads-list"></div>
+    </div>
+  </div>
+
+  <!-- Leads page -->
+  <div id="page-leads" class="page">
+    <div class="search-row">
+      <input class="search-input" id="search" type="search" placeholder="Search name, city, email…" oninput="renderLeads()">
+    </div>
+    <div class="filter-row" id="filter-row">
+      <span class="pill active" data-stage="all" onclick="setFilter(this)">All</span>
+      <span class="pill" data-stage="scraped"     onclick="setFilter(this)">Scraped</span>
+      <span class="pill" data-stage="emailed"     onclick="setFilter(this)">Emailed</span>
+      <span class="pill" data-stage="followed_up" onclick="setFilter(this)">Followed Up</span>
+      <span class="pill" data-stage="no_email"    onclick="setFilter(this)">No Email</span>
+      <span class="pill" data-stage="replied"     onclick="setFilter(this)">Replied</span>
+      <span class="pill" data-stage="onboarded"   onclick="setFilter(this)">Onboarded</span>
+    </div>
+    <div id="leads-list"></div>
+    <div id="load-more" style="display:none;text-align:center;padding:12px;">
+      <button class="act-btn" onclick="showMore()">Load more</button>
+    </div>
+  </div>
+
+  <!-- Pipeline page -->
+  <div id="page-pipeline" class="page">
+    <div id="pipeline-list"></div>
+  </div>
+
+</div>
+
+<!-- Bottom nav -->
+<div id="bottomnav">
+  <button class="nav-tab active" data-page="overview" onclick="switchPage(this)">
+    <span class="icon">📊</span>Overview
+  </button>
+  <button class="nav-tab" data-page="leads" onclick="switchPage(this)">
+    <span class="icon">👥</span>Leads
+  </button>
+  <button class="nav-tab" data-page="pipeline" onclick="switchPage(this)">
+    <span class="icon">🔄</span>Pipeline
+  </button>
+</div>
+
+<!-- Settings overlay -->
+<div id="settings-overlay" onclick="maybeCloseSettings(event)">
+  <div id="settings-sheet">
+    <div class="sheet-title">Supabase Settings</div>
+    <div class="field-label">Project URL</div>
+    <input class="field-input" id="cfg-url" type="url" placeholder="https://xxxx.supabase.co">
+    <div class="field-label">Anon / Public Key</div>
+    <input class="field-input" id="cfg-key" type="text" placeholder="eyJhbGci…">
+    <button class="btn-primary" onclick="saveSettings()">Save & Connect</button>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ── Config ─────────────────────────────────────────────────── */
+const TABLE   = 'outreach_leads'
+const PAGE_SZ = 40
+
+let cfg = {
+  url: localStorage.getItem('sb_url')  || '',
+  key: localStorage.getItem('sb_key')  || '',
+}
+
+/* ── State ───────────────────────────────────────────────────── */
+let allLeads      = []
+let filtered      = []
+let visibleCount  = PAGE_SZ
+let activeFilter  = 'all'
+let loading       = false
+
+/* ── Boot ────────────────────────────────────────────────────── */
+window.onload = () => {
+  if (!cfg.url || !cfg.key) {
+    openSettings()
+  } else {
+    loadData()
+  }
+}
+
+/* ── Supabase REST fetch ─────────────────────────────────────── */
+async function sbFetch(path, opts = {}) {
+  const resp = await fetch(`${cfg.url}/rest/v1/${path}`, {
+    ...opts,
+    headers: {
+      apikey:          cfg.key,
+      Authorization:   `Bearer ${cfg.key}`,
+      'Content-Type':  'application/json',
+      ...(opts.headers || {}),
+    },
+  })
+  return resp
+}
+
+/* ── Load data ───────────────────────────────────────────────── */
+async function loadData() {
+  if (loading) return
+  loading = true
+
+  const listEl = document.getElementById('leads-list')
+  listEl.innerHTML = '<div class="empty"><div class="spinner"></div><br>Loading leads…</div>'
+
+  try {
+    let all = []
+    let from = 0
+    const limit = 1000
+    while (true) {
+      const r = await sbFetch(
+        `${TABLE}?select=*&order=lead_score.desc&limit=${limit}&offset=${from}`,
+        { headers: { Prefer: 'count=exact', Range: `${from}-${from + limit - 1}` } }
+      )
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
+      const batch = await r.json()
+      all = all.concat(batch)
+      if (batch.length < limit) break
+      from += limit
+    }
+    allLeads = all
+    renderAll()
+    toast(`${allLeads.length} leads loaded`)
+  } catch (err) {
+    listEl.innerHTML = `<div class="empty">Failed to load.<br><small style="color:var(--red)">${err.message}</small><br><br>Check Settings ⚙</div>`
+    toast('Load failed — check settings')
+  } finally {
+    loading = false
+  }
+}
+
+/* ── Render all sections ─────────────────────────────────────── */
+function renderAll() {
+  renderOverview()
+  renderLeads()
+  renderPipeline()
+}
+
+/* ── Overview ────────────────────────────────────────────────── */
+const STAGE_ORDER = ['scraped', 'emailed', 'followed_up', 'replied', 'onboarded', 'no_email', 'failed']
+const STAGE_LABEL = {
+  scraped: 'Scraped', emailed: 'Emailed', followed_up: 'Followed Up',
+  replied: 'Replied', onboarded: 'Onboarded', no_email: 'No Email', failed: 'Failed',
+}
+const STAGE_COLOR = {
+  scraped: '#6b7394', emailed: '#60a5fa', followed_up: '#4ade80',
+  replied: '#86efac', onboarded: '#7c8cf8', no_email: '#fb923c', failed: '#f87171',
+}
+
+function stageCounts() {
+  const counts = {}
+  for (const l of allLeads) counts[l.pipeline_stage] = (counts[l.pipeline_stage] || 0) + 1
+  return counts
+}
+
+function renderOverview() {
+  const counts = stageCounts()
+  const total  = allLeads.length
+  const emailed = (counts.emailed || 0) + (counts.followed_up || 0)
+  setText('s-total',    total)
+  setText('s-emailed',  emailed)
+  setText('s-replied',  counts.replied || 0)
+  setText('s-onboarded',counts.onboarded || 0)
+
+  const breakEl = document.getElementById('breakdown-list')
+  breakEl.innerHTML = STAGE_ORDER.map(s => {
+    const n = counts[s] || 0
+    const pct = total ? Math.round(n / total * 100) : 0
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:${STAGE_COLOR[s]};font-weight:600;font-size:13px">${STAGE_LABEL[s]}</span>
+      <span style="color:var(--muted);font-size:12px">${n} &nbsp;<span style="color:var(--border)">|</span>&nbsp; ${pct}%</span>
+    </div>`
+  }).join('')
+
+  const hot = allLeads.filter(l => (l.lead_score || 0) >= 8).slice(0, 5)
+  const hotEl = document.getElementById('hot-leads-list')
+  if (!hot.length) {
+    hotEl.innerHTML = '<div class="empty" style="padding:12px">No leads with score ≥ 8 yet.</div>'
+    return
+  }
+  hotEl.innerHTML = hot.map(l => `
+    <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div>
+        <div style="font-weight:600;font-size:13px">${esc(l.business_name)}</div>
+        <div style="font-size:11px;color:var(--muted)">${esc(l.city)}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="stage-badge stage-${l.pipeline_stage}">${STAGE_LABEL[l.pipeline_stage] || l.pipeline_stage}</div>
+        <div style="font-size:12px;color:var(--yellow);margin-top:4px">★ ${l.lead_score || 0}</div>
+      </div>
+    </div>`).join('')
+}
+
+/* ── Leads ───────────────────────────────────────────────────── */
+function setFilter(el) {
+  document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'))
+  el.classList.add('active')
+  activeFilter = el.dataset.stage
+  visibleCount = PAGE_SZ
+  renderLeads()
+}
+
+function renderLeads() {
+  const q = (document.getElementById('search').value || '').toLowerCase()
+  filtered = allLeads.filter(l => {
+    if (activeFilter !== 'all' && l.pipeline_stage !== activeFilter) return false
+    if (!q) return true
+    return (l.business_name || '').toLowerCase().includes(q) ||
+           (l.city          || '').toLowerCase().includes(q) ||
+           (l.email         || '').toLowerCase().includes(q)
+  })
+
+  const visible  = filtered.slice(0, visibleCount)
+  const listEl   = document.getElementById('leads-list')
+  const moreEl   = document.getElementById('load-more')
+
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="empty">No leads match this filter.</div>'
+    moreEl.style.display = 'none'
+    return
+  }
+
+  listEl.innerHTML = `<div class="lead-count">${filtered.length} leads</div>` +
+    visible.map(leadHtml).join('')
+  moreEl.style.display = filtered.length > visibleCount ? 'block' : 'none'
+}
+
+function leadHtml(l) {
+  const stageLbl = STAGE_LABEL[l.pipeline_stage] || l.pipeline_stage
+  const actions  = buildActions(l)
+  return `<div class="lead-item" data-name="${esc(l.business_name)}">
+    <div class="lead-header">
+      <div class="lead-name">${esc(l.business_name)}</div>
+      <span class="stage-badge stage-${l.pipeline_stage}">${stageLbl}</span>
+    </div>
+    <div class="lead-meta">
+      <span>${esc(l.city)}</span>
+      ${l.rating ? `<span>★ ${l.rating}</span>` : ''}
+      ${l.problem_count ? `<span>${l.problem_count} issues</span>` : ''}
+      ${l.lead_score ? `<span>Score ${l.lead_score}</span>` : ''}
+    </div>
+    ${l.email ? `<div class="lead-email">${esc(l.email)}</div>` : ''}
+    <div class="lead-actions">${actions}</div>
+  </div>`
+}
+
+function buildActions(l) {
+  const btns = []
+  const s = l.pipeline_stage
+  if (s !== 'replied')   btns.push(`<button class="act-btn replied"   onclick="markLead('${esc(l.business_name)}','replied')">✓ Replied</button>`)
+  if (s !== 'onboarded') btns.push(`<button class="act-btn onboarded" onclick="markLead('${esc(l.business_name)}','onboarded')">🏥 Onboarded</button>`)
+  if (s !== 'scraped')   btns.push(`<button class="act-btn undo"      onclick="markLead('${esc(l.business_name)}','scraped')">↩ Reset</button>`)
+  return btns.join('')
+}
+
+function showMore() {
+  visibleCount += PAGE_SZ
+  renderLeads()
+}
+
+/* ── Pipeline ────────────────────────────────────────────────── */
+function renderPipeline() {
+  const counts = stageCounts()
+  const total  = allLeads.length
+  const stages = [
+    { key: 'scraped',     icon: '🔍', label: 'Scraped',     sub: 'Found by scraper' },
+    { key: 'emailed',     icon: '📧', label: 'Emailed',     sub: 'Initial email sent' },
+    { key: 'followed_up', icon: '📩', label: 'Followed Up', sub: 'Sequence step 2+' },
+    { key: 'replied',     icon: '💬', label: 'Replied',     sub: 'Got a response' },
+    { key: 'onboarded',   icon: '🏥', label: 'Onboarded',   sub: 'Became a client' },
+    { key: 'no_email',    icon: '🚫', label: 'No Email',    sub: 'Could not find contact' },
+    { key: 'failed',      icon: '⚠',  label: 'Failed',     sub: 'Send error' },
+  ]
+  const pipeEl = document.getElementById('pipeline-list')
+  pipeEl.innerHTML = stages.map(({ key, icon, label, sub }) => {
+    const n   = counts[key] || 0
+    const pct = total ? Math.round(n / total * 100) : 0
+    return `<div class="pipeline-stage">
+      <span class="pipeline-icon">${icon}</span>
+      <div style="flex:1">
+        <div class="pipeline-label">${label}</div>
+        <div class="pipeline-sub">${sub}</div>
+        <div class="pipeline-bar">
+          <div class="pipeline-fill" style="width:${pct}%;background:${STAGE_COLOR[key]}"></div>
+        </div>
+      </div>
+      <div class="pipeline-count" style="color:${STAGE_COLOR[key]}">${n}</div>
+    </div>`
+  }).join('')
+}
+
+/* ── Mark lead ───────────────────────────────────────────────── */
+async function markLead(name, newStage) {
+  try {
+    const encoded = encodeURIComponent(name)
+    const r = await sbFetch(
+      `${TABLE}?business_name=eq.${encoded}`,
+      {
+        method:  'PATCH',
+        body:    JSON.stringify({ pipeline_stage: newStage }),
+        headers: { Prefer: 'return=minimal' },
+      }
+    )
+    if (!r.ok) throw new Error(await r.text())
+
+    const lead = allLeads.find(l => l.business_name === name)
+    if (lead) lead.pipeline_stage = newStage
+    renderAll()
+    toast(`Marked as ${STAGE_LABEL[newStage] || newStage}`)
+  } catch (err) {
+    toast('Update failed — check connection')
+  }
+}
+
+/* ── Settings ────────────────────────────────────────────────── */
+function openSettings() {
+  document.getElementById('cfg-url').value = cfg.url
+  document.getElementById('cfg-key').value = cfg.key
+  document.getElementById('settings-overlay').classList.add('open')
+}
+
+function saveSettings() {
+  const url = document.getElementById('cfg-url').value.trim().replace(/\/$/, '')
+  const key = document.getElementById('cfg-key').value.trim()
+  if (!url || !key) { toast('Both fields are required'); return }
+  cfg.url = url
+  cfg.key = key
+  localStorage.setItem('sb_url', url)
+  localStorage.setItem('sb_key', key)
+  document.getElementById('settings-overlay').classList.remove('open')
+  loadData()
+}
+
+function maybeCloseSettings(ev) {
+  if (ev.target === document.getElementById('settings-overlay'))
+    document.getElementById('settings-overlay').classList.remove('open')
+}
+
+/* ── Navigation ──────────────────────────────────────────────── */
+function switchPage(btn) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'))
+  btn.classList.add('active')
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
+  document.getElementById(`page-${btn.dataset.page}`).classList.add('active')
+}
+
+/* ── Refresh ─────────────────────────────────────────────────── */
+function refresh() {
+  if (!cfg.url || !cfg.key) { openSettings(); return }
+  loadData()
+}
+
+/* ── Helpers ─────────────────────────────────────────────────── */
+function setText(id, val) {
+  const el = document.getElementById(id)
+  if (el) el.textContent = val
+}
+
+function esc(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+let _toastTimer = null
+function toast(msg) {
+  const el = document.getElementById('toast')
+  el.textContent = msg
+  el.classList.add('show')
+  clearTimeout(_toastTimer)
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 2500)
+}
+</script>
+</body>
+</html>

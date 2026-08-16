@@ -43,3 +43,17 @@ __pycache__/
 dashboard/node_modules/
 replied.json
 owner_outreach.json
+
+# Mobile APK build output (not the android project itself — that IS committed)
+dashboard/android/app/build/
+dashboard/android/.gradle/
+
+# Log output files (runtime stdout/stderr captures)
+*_log.txt
+*_err.txt
+*_out.txt
+overnight_log.txt
+push250_log.txt
+
+# Third-party OSINT tools (cloned separately, not part of this repo)
+recon_ng_tool/

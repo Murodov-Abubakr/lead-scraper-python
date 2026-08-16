@@ -3,12 +3,13 @@
 Finds the dentist owner's name and personal email using:
 1. About page scraping (find dentist name)
 2. theHarvester (find all emails on domain)
-3. Email permutation + SMTP verification (guess personal email)
-4. Sherlock (find social profiles by name)
+3. Holehe (verify email by checking site registrations)
+4. Social-Analyzer (find Facebook/Instagram/LinkedIn by name)
+5. Sherlock (find social accounts by username)
 """
 
-import re, socket, smtplib, subprocess, requests, json, time
-from urllib.parse import urljoin, urlparse
+import re, socket, subprocess, requests, json, time, asyncio
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import logging
 
@@ -124,30 +125,58 @@ def _permutations(first, last, domain):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# STEP 4: Disify — free email verification (no signup needed)
+# STEP 4: Holehe — verify email by checking site registrations
 # ═══════════════════════════════════════════════════════════════════
 
-def disify_verify(email):
-    """
-    Verify email via Disify free API.
-    Returns True if email format is valid, domain has MX, and is not disposable.
-    """
+async def _holehe_check(email):
+    """Run holehe async check — returns list of sites where email is registered."""
     try:
-        r = requests.get(
-            f"https://api.disify.com/api/email/{email}",
-            timeout=8
-        )
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        # format=True, dns=True, disposable=False = real email
-        return (
-            data.get("format", False) and
-            data.get("dns", False) and
-            not data.get("disposable", True)
-        )
+        import httpx
+        from holehe.core import import_submodules, get_functions, default_checker
+        modules   = import_submodules("holehe.modules")
+        functions = get_functions(modules)
+        client    = httpx.AsyncClient()
+        out       = []
+        await default_checker(email, functions, client, out)
+        await client.aclose()
+        return [r["name"] for r in out if r.get("exists")]
+    except Exception as e:
+        log.debug("  Holehe error: %s", e)
+        return []
+
+def holehe_verify(email):
+    """Returns True if email is registered on at least one site."""
+    try:
+        sites = asyncio.run(_holehe_check(email))
+        if sites:
+            log.info("  Holehe found %s registered on: %s", email, sites[:3])
+            return True
+        return False
     except Exception:
         return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 5b: Social-Analyzer — find profiles by full name
+# ═══════════════════════════════════════════════════════════════════
+
+def social_analyzer_profiles(name):
+    """Find social profiles using Social-Analyzer (better for full names)."""
+    try:
+        result = subprocess.run(
+            ["python", "-m", "social_analyzer", "--query", name,
+             "--platforms", "facebook,linkedin,instagram",
+             "--output", "json", "--silent"],
+            capture_output=True, text=True, timeout=30
+        )
+        data = json.loads(result.stdout) if result.stdout.strip() else {}
+        profiles = []
+        for platform, info in data.items():
+            if isinstance(info, dict) and info.get("url"):
+                profiles.append(info["url"])
+        return profiles
+    except Exception:
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -201,29 +230,33 @@ def find_owner_email(website, business_name=""):
     ]
     all_harvested = personal_harvested or harvested
 
-    # Verify each harvested email with Disify
-    for email in all_harvested:
-        log.info("  Disify verify harvested: %s", email)
-        if disify_verify(email):
-            log.info("  ✓ Verified: %s", email)
-            return name, email, []
-        time.sleep(0.3)
+    # Return harvested personal email directly (real, found by theHarvester)
+    if all_harvested:
+        log.info("  Using harvested email: %s", all_harvested[0])
+        return name, all_harvested[0], []
 
-    # Step 3: Permutations + Disify verify (only if we have owner name)
+    # Step 3: Permutations + Holehe verify
     if len(parts) >= 2:
         first, last = parts[0], parts[-1]
-        for email in _permutations(first, last, domain):
-            log.info("  Disify verify permutation: %s", email)
-            if disify_verify(email):
-                log.info("  ✓ Verified: %s", email)
-                return name, email, []
-            time.sleep(0.3)
+        perms = _permutations(first, last, domain)
 
-    # Step 4: Sherlock for social profiles (when no email found)
+        for email in perms:
+            log.info("  Holehe checking: %s", email)
+            if holehe_verify(email):
+                log.info("  ✓ Holehe confirmed: %s", email)
+                return name, email, []
+
+        # Holehe found nothing — return all permutations for bounce tracking
+        log.info("  Holehe found nothing — returning permutations for bounce tracking")
+        return name, perms[0], perms
+
+    # Step 4: Social-Analyzer + Sherlock for social profiles
     profiles = []
     if name:
-        log.info("  No email found — trying Sherlock for social profiles")
-        profiles = find_social_profiles(name)
+        log.info("  No email found — trying Social-Analyzer + Sherlock")
+        profiles = social_analyzer_profiles(name)
+        if not profiles:
+            profiles = find_social_profiles(name)
 
     return name, "", profiles
 

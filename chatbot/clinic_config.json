@@ -1,35 +1,39 @@
 {
-  "clinic_name": "Smile Dental Care",
-  "doctor_name": "Dr. Sarah Johnson",
-  "phone": "(210) 555-0123",
-  "address": "1234 Main Street, San Antonio, TX 78201",
-  "email": "info@smiledentalcare.com",
-  "owner_email": "dr.johnson@smiledentalcare.com",
+  "clinic_name": "Bright Smile Dental",
+  "doctor_name": "Dr. James Patel",
+  "phone": "020 7946 0123",
+  "emergency_phone": "020 7946 0124",
+  "address": "14 Harley Street, London, W1G 9PH",
+  "email": "hello@brightsmile.co.uk",
+  "owner_email": "dr.patel@brightsmile.co.uk",
   "hours": {
-    "monday":    "8:00 AM - 5:00 PM",
-    "tuesday":   "8:00 AM - 5:00 PM",
-    "wednesday": "8:00 AM - 6:00 PM",
-    "thursday":  "8:00 AM - 5:00 PM",
-    "friday":    "8:00 AM - 3:00 PM",
-    "saturday":  "9:00 AM - 1:00 PM",
+    "monday":    "8:30 AM - 6:00 PM",
+    "tuesday":   "8:30 AM - 6:00 PM",
+    "wednesday": "8:30 AM - 7:00 PM",
+    "thursday":  "8:30 AM - 6:00 PM",
+    "friday":    "8:30 AM - 5:00 PM",
+    "saturday":  "9:00 AM - 2:00 PM",
     "sunday":    "Closed"
   },
   "services": [
     "General Dentistry",
-    "Teeth Cleaning",
     "Teeth Whitening",
     "Dental Implants",
     "Invisalign",
     "Emergency Dental Care",
-    "Root Canal",
-    "Crowns & Bridges",
-    "Pediatric Dentistry"
+    "Root Canal Treatment",
+    "Crowns & Veneers",
+    "Composite Bonding",
+    "Hygienist & Scale & Polish",
+    "Smile Makeovers"
   ],
-  "insurance": [
-    "Delta Dental", "Cigna", "Aetna", "MetLife",
-    "United Healthcare", "BlueCross BlueShield", "Humana"
-  ],
-  "widget_color": "#2563eb",
-  "welcome_message": "Hi! I'm the AI assistant for Smile Dental Care. I can help you book an appointment or answer any questions. How can I help you today?",
-  "after_hours_message": "Our office is currently closed, but I can still book your appointment! Leave your details and Dr. Johnson's team will confirm first thing in the morning."
+  "nhs_or_private": "private",
+  "payment_plans": "0% finance available through Payl8r — spread the cost of any treatment over 12 months",
+  "new_patient_offer": "Free consultation for new patients — no obligation",
+  "parking": "Nearest car park: Cavendish Square NCP, 5 minutes walk",
+  "transport": "Oxford Circus (5 min walk), Regent's Park (8 min walk)",
+  "languages": ["English", "Hindi", "Gujarati"],
+  "widget_color": "#1d4ed8",
+  "welcome_message": "Hi! I'm the AI assistant for Bright Smile Dental. I can help you book an appointment or answer any questions about our treatments. How can I help you today?",
+  "after_hours_message": "Our practice is currently closed, but I can still take your details and the team will call you first thing to confirm your appointment."
 }

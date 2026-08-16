@@ -1,0 +1,13 @@
+{
+  "appId": "com.vicere.outreach",
+  "appName": "Vicere",
+  "webDir": "mobile",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#0c0e1a"
+  }
+}

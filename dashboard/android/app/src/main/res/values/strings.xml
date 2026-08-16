@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Vicere</string>
+    <string name="title_activity_main">Vicere</string>
+    <string name="package_name">com.vicere.outreach</string>
+    <string name="custom_url_scheme">com.vicere.outreach</string>
+</resources>

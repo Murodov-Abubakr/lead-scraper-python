@@ -1,0 +1,18 @@
+# NEVER commit — contains API keys and passwords
+.env
+
+# Patient data — personal information
+appointments.csv
+analytics.json
+analytics.json.tmp
+
+# Google Calendar service account key
+credentials.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local dev
+*.log
