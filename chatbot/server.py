@@ -11,7 +11,7 @@ Widget embed: <script src="http://localhost:5000/widget.js"></script>
 import csv, json, logging, os, re, secrets, smtplib, functools, time
 from datetime import datetime
 from email.mime.text import MIMEText
-from flask import Flask, request, jsonify, render_template_string, Response
+from flask import Flask, request, jsonify, render_template_string, Response, session, redirect, url_for
 from dotenv import load_dotenv
 
 _COLOR_RE    = re.compile(r'^#[0-9a-fA-F]{3,6}$')
@@ -29,7 +29,8 @@ logging.basicConfig(
 )
 
 from bot import chat, CONFIG, is_after_hours
-from analytics import track_conversation, track_booking, get_stats
+from analytics import (track_conversation, track_booking, get_stats,
+                        track_clinic_conversation, track_clinic_booking, get_clinic_stats)
 from calendar_integration import create_appointment_event
 from db import DATABASE_URL, get_db
 
@@ -122,15 +123,15 @@ def require_password(f):
 # APPOINTMENT STORAGE + NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════════
 
-def save_appointment(data: dict):
+def save_appointment(data: dict, clinic_id: str = ""):
     if DATABASE_URL:
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO appointments (name, phone, service, date, new_patient) VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO appointments (name, phone, service, date, new_patient, clinic_id) VALUES (%s, %s, %s, %s, %s, %s)",
                 (data.get("name", ""), data.get("phone", ""),
                  data.get("service", ""), data.get("date", ""),
-                 data.get("new_patient", "")),
+                 data.get("new_patient", ""), clinic_id),
             )
     else:
         is_new = not os.path.exists(APPOINTMENTS_FILE)
@@ -228,6 +229,8 @@ def chat_endpoint():
     if not session:
         try:
             track_conversation()
+            if clinic_id:
+                track_clinic_conversation(clinic_id)
         except Exception as e:
             app.logger.warning("Analytics tracking failed: %s", e)
 
@@ -237,13 +240,15 @@ def chat_endpoint():
 
     if appointment:
         try:
-            save_appointment(appointment)
+            save_appointment(appointment, clinic_id)
         except Exception as e:
             app.logger.error("Failed to save appointment: %s", e)
         notify_clinic(appointment, clinic_config)
         create_appointment_event(appointment)
         try:
             track_booking()
+            if clinic_id:
+                track_clinic_booking(clinic_id)
         except Exception as e:
             app.logger.warning("Booking tracking failed: %s", e)
 
@@ -880,6 +885,343 @@ def demo():
         your_name=os.getenv("YOUR_NAME", "Vicere"),
         phone=phone,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PER-CLINIC DASHBOARD  (cookie-based auth, no password in URL)
+# ═══════════════════════════════════════════════════════════════════
+
+_CLINIC_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ clinic_name }} — Sign In</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#f1f5f9;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:white;border-radius:16px;padding:40px;
+        box-shadow:0 8px 40px rgba(0,0,0,.12);width:100%;max-width:380px}
+  .logo{text-align:center;margin-bottom:28px}
+  .logo .icon{font-size:36px;margin-bottom:8px}
+  .logo h1{font-size:20px;font-weight:700;color:#1e293b}
+  .logo p{font-size:13px;color:#64748b;margin-top:4px}
+  label{display:block;font-size:12px;font-weight:600;color:#475569;
+        margin-bottom:6px;letter-spacing:.03em}
+  input[type=password]{width:100%;border:1.5px solid #e2e8f0;border-radius:10px;
+    padding:11px 14px;font-size:14px;outline:none;transition:border-color .2s;
+    margin-bottom:20px}
+  input[type=password]:focus{border-color:{{ color }}}
+  button{width:100%;background:{{ color }};color:white;border:none;
+         border-radius:10px;padding:13px;font-size:15px;font-weight:600;
+         cursor:pointer;transition:opacity .2s}
+  button:hover{opacity:.88}
+  .err{background:#fef2f2;border:1px solid #fecaca;color:#dc2626;
+       border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="icon">🦷</div>
+    <h1>{{ clinic_name }}</h1>
+    <p>Chatbot Dashboard</p>
+  </div>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="POST" action="/clinic/{{ clinic_id }}/auth">
+    <label>Dashboard Password</label>
+    <input type="password" name="pwd" placeholder="Enter your password" autofocus required>
+    <button type="submit">Sign In</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
+_CLINIC_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ clinic_name }} — Dashboard</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#f8fafc;color:#1e293b;padding:28px 20px 60px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;
+          margin-bottom:28px;flex-wrap:wrap;gap:12px}
+  .brand{display:flex;align-items:center;gap:10px}
+  .brand-dot{width:10px;height:10px;border-radius:50%;background:{{ color }}}
+  .brand-name{font-size:18px;font-weight:700}
+  .brand-sub{font-size:12px;color:#94a3b8;margin-top:2px}
+  .logout{font-size:12px;color:#94a3b8;text-decoration:none;
+          padding:6px 14px;border:1px solid #e2e8f0;border-radius:8px}
+  .logout:hover{color:#ef4444;border-color:#fecaca}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));
+         gap:14px;margin-bottom:24px}
+  .card{background:white;border-radius:14px;padding:20px;
+        box-shadow:0 1px 4px rgba(0,0,0,.07)}
+  .card .lbl{font-size:11px;color:#64748b;font-weight:600;
+             letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+  .card .val{font-size:30px;font-weight:700;color:{{ color }}}
+  .card .sub{font-size:11px;color:#94a3b8;margin-top:4px}
+
+  .section{background:white;border-radius:14px;padding:22px;
+           box-shadow:0 1px 4px rgba(0,0,0,.07);margin-bottom:18px}
+  .section h2{font-size:14px;font-weight:600;margin-bottom:18px;color:#334155}
+
+  .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .bar-lbl{width:36px;font-size:11px;color:#94a3b8;text-align:right;flex-shrink:0}
+  .bar-track{flex:1;background:#f1f5f9;border-radius:4px;height:10px;overflow:hidden}
+  .bar-fill{height:100%;background:{{ color }};border-radius:4px;transition:width .4s}
+  .bar-cnt{width:28px;font-size:11px;color:#94a3b8}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;
+     color:#64748b;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+  td{padding:10px 10px;border-bottom:1px solid #f1f5f9}
+  tr:hover td{background:#f8fafc}
+  .badge-new{background:#dcfce7;color:#16a34a;font-size:10px;
+             padding:2px 7px;border-radius:20px;font-weight:600}
+  .ts{color:#94a3b8}
+
+  .embed-box{background:#f1f5f9;border-radius:8px;padding:14px;
+             font-family:monospace;font-size:12px;color:#334155;
+             word-break:break-all;margin-top:8px}
+  .copy-btn{margin-top:10px;background:{{ color }};color:white;border:none;
+            padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-dot"></div>
+    <div>
+      <div class="brand-name">{{ clinic_name }}</div>
+      <div class="brand-sub">AI Chatbot Dashboard · auto-refreshes every 60 s</div>
+    </div>
+  </div>
+  <a href="/clinic/{{ clinic_id }}/logout" class="logout">Sign out</a>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="lbl">Total Chats</div>
+    <div class="val" id="tc">—</div>
+    <div class="sub" id="tc2">Loading…</div>
+  </div>
+  <div class="card">
+    <div class="lbl">Appointments</div>
+    <div class="val" id="tb">—</div>
+    <div class="sub" id="tb2">Loading…</div>
+  </div>
+  <div class="card">
+    <div class="lbl">Conversion</div>
+    <div class="val" id="cr">—</div>
+    <div class="sub">chat → booking</div>
+  </div>
+  <div class="card">
+    <div class="lbl">Peak Hour</div>
+    <div class="val" id="ph">—</div>
+    <div class="sub">most active</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Activity by Hour</h2>
+  <div id="chart"></div>
+</div>
+
+<div class="section">
+  <h2>Your Embed Code</h2>
+  <p style="font-size:13px;color:#64748b">
+    Paste this line before &lt;/body&gt; on your website to activate the chatbot:
+  </p>
+  <div class="embed-box" id="embed_code">Loading…</div>
+  <button class="copy-btn" onclick="copyEmbed()">Copy Code</button>
+</div>
+
+<div class="section">
+  <h2>Recent Appointments</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Phone</th><th>Service</th><th>Date Requested</th><th>Booked</th></tr></thead>
+    <tbody id="appt_body"><tr><td colspan="5" style="color:#94a3b8;padding:20px">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+const CID = {{ clinic_id_js }};
+function esc(s){const d=document.createElement('div');d.appendChild(document.createTextNode(s||'—'));return d.innerHTML;}
+async function loadStats(){
+  try{
+    const d=await(await fetch('/clinic/'+CID+'/stats')).json();
+    document.getElementById('tc').textContent=d.total_conversations;
+    document.getElementById('tc2').textContent=d.today_conversations+' today';
+    document.getElementById('tb').textContent=d.total_bookings;
+    document.getElementById('tb2').textContent=d.today_bookings+' today';
+    document.getElementById('cr').textContent=d.conversion_rate+'%';
+    document.getElementById('ph').textContent=d.peak_hour;
+    const h=d.hourly||{},mx=Math.max(...Object.values(h),1),el=document.getElementById('chart');
+    el.innerHTML='';
+    for(let i=0;i<24;i++){
+      const v=h[String(i)]||0,p=Math.round(v/mx*100);
+      el.innerHTML+=`<div class="bar-row">
+        <div class="bar-lbl">${String(i).padStart(2,'0')}h</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${p}%"></div></div>
+        <div class="bar-cnt">${v}</div></div>`;
+    }
+  }catch(e){console.error(e);}
+}
+async function loadAppts(){
+  try{
+    const d=await(await fetch('/clinic/'+CID+'/appointments')).json();
+    const tb=document.getElementById('appt_body');
+    if(!d.appointments.length){
+      tb.innerHTML='<tr><td colspan="5" style="color:#94a3b8;padding:20px">No appointments yet.</td></tr>';
+      return;
+    }
+    tb.innerHTML=d.appointments.slice(0,20).map(a=>`<tr>
+      <td>${esc(a.name)}</td><td>${esc(a.phone)}</td>
+      <td>${esc(a.service)}</td><td>${esc(a.date)}</td>
+      <td class="ts">${esc(a.timestamp)}</td></tr>`).join('');
+  }catch(e){console.error(e);}
+}
+function loadEmbed(){
+  const code='<script src="'+window.location.origin+'/widget.js?id='+CID+'"><\\/script>';
+  document.getElementById('embed_code').textContent=code;
+}
+function copyEmbed(){
+  navigator.clipboard.writeText(document.getElementById('embed_code').textContent)
+    .then(()=>{const b=document.querySelector('.copy-btn');
+      b.textContent='Copied!';setTimeout(()=>b.textContent='Copy Code',2000);});
+}
+loadStats();loadAppts();loadEmbed();
+setInterval(()=>{loadStats();loadAppts();},60000);
+</script>
+</body>
+</html>"""
+
+
+def _clinic_auth_required(f):
+    """Decorator: checks Flask session for matching clinic_id."""
+    @functools.wraps(f)
+    def decorated(clinic_id, *args, **kwargs):
+        if session.get("clinic_id") != clinic_id:
+            return redirect(url_for("clinic_login", clinic_id=clinic_id))
+        return f(clinic_id, *args, **kwargs)
+    return decorated
+
+
+def _get_clinic_or_404(clinic_id: str):
+    cfg = _get_clinic(clinic_id)
+    if not cfg:
+        return None
+    return cfg
+
+
+@app.route("/clinic/<clinic_id>", methods=["GET"])
+def clinic_login(clinic_id):
+    clinic_id = clinic_id[:64]
+    cfg = _get_clinic_or_404(clinic_id)
+    if not cfg:
+        return Response("Clinic not found.", 404)
+    color = _safe_color(cfg.get("widget_color", "#2563eb"))
+    return render_template_string(
+        _CLINIC_LOGIN_HTML,
+        clinic_id=clinic_id,
+        clinic_name=cfg.get("clinic_name", clinic_id),
+        color=color,
+        error="",
+    )
+
+
+@app.route("/clinic/<clinic_id>/auth", methods=["POST"])
+def clinic_auth(clinic_id):
+    clinic_id = clinic_id[:64]
+    cfg = _get_clinic_or_404(clinic_id)
+    if not cfg:
+        return Response("Clinic not found.", 404)
+
+    pwd = request.form.get("pwd", "")
+    color = _safe_color(cfg.get("widget_color", "#2563eb"))
+
+    # Fetch stored password from DB
+    stored_pwd = None
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT dashboard_password FROM clinics WHERE id = %s", (clinic_id,))
+            row = cur.fetchone()
+            if row:
+                stored_pwd = row[0]
+    except Exception as e:
+        app.logger.error("Clinic auth DB error: %s", e)
+
+    if not stored_pwd or not secrets.compare_digest(pwd, stored_pwd):
+        return render_template_string(
+            _CLINIC_LOGIN_HTML,
+            clinic_id=clinic_id,
+            clinic_name=cfg.get("clinic_name", clinic_id),
+            color=color,
+            error="Incorrect password. Please try again.",
+        )
+
+    session["clinic_id"] = clinic_id
+    session.permanent = True
+    return redirect(url_for("clinic_dashboard", clinic_id=clinic_id))
+
+
+@app.route("/clinic/<clinic_id>/dashboard")
+@_clinic_auth_required
+def clinic_dashboard(clinic_id):
+    cfg   = _get_clinic_or_404(clinic_id)
+    color = _safe_color(cfg.get("widget_color", "#2563eb"))
+    return render_template_string(
+        _CLINIC_DASHBOARD_HTML,
+        clinic_id=clinic_id,
+        clinic_id_js=json.dumps(clinic_id),
+        clinic_name=cfg.get("clinic_name", clinic_id),
+        color=color,
+    )
+
+
+@app.route("/clinic/<clinic_id>/stats")
+@_clinic_auth_required
+def clinic_stats(clinic_id):
+    return jsonify(get_clinic_stats(clinic_id))
+
+
+@app.route("/clinic/<clinic_id>/appointments")
+@_clinic_auth_required
+def clinic_appointments(clinic_id):
+    rows = []
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT name, phone, service, date, new_patient, booked_at
+                FROM appointments
+                WHERE clinic_id = %s
+                ORDER BY booked_at DESC LIMIT 100
+            """, (clinic_id,))
+            cols = [d[0] for d in cur.description]
+            for row in cur.fetchall():
+                r = dict(zip(cols, row))
+                booked_at = r.pop("booked_at", None)
+                r["timestamp"] = booked_at.strftime("%Y-%m-%d %H:%M") if booked_at else ""
+                rows.append(r)
+    except Exception as e:
+        app.logger.error("Clinic appointments error: %s", e)
+    return jsonify({"total": len(rows), "appointments": rows})
+
+
+@app.route("/clinic/<clinic_id>/logout")
+def clinic_logout(clinic_id):
+    session.pop("clinic_id", None)
+    return redirect(url_for("clinic_login", clinic_id=clinic_id[:64]))
 
 
 # ═══════════════════════════════════════════════════════════════════

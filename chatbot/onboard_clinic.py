@@ -8,7 +8,7 @@ Usage:
     python onboard_clinic.py https://brightsmile.co.uk --color 1a73e8 --email owner@clinic.com
 """
 
-import json, os, re, sys, argparse
+import json, os, re, sys, argparse, secrets
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -154,20 +154,23 @@ def generate_clinic_id(clinic_name: str) -> str:
     return slug.strip('-')[:50]
 
 
-def save_to_supabase(clinic_id: str, owner_email: str, widget_color: str, config: dict):
+def save_to_supabase(clinic_id: str, owner_email: str, widget_color: str,
+                     config: dict, dashboard_password: str):
     sys.path.insert(0, os.path.dirname(__file__))
     from db import get_db
 
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO clinics (id, owner_email, widget_color, config)
-            VALUES (%s, %s, %s, %s::jsonb)
+            INSERT INTO clinics (id, owner_email, widget_color, config, dashboard_password)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
             ON CONFLICT (id) DO UPDATE SET
-                owner_email  = EXCLUDED.owner_email,
-                widget_color = EXCLUDED.widget_color,
-                config       = EXCLUDED.config
-        """, (clinic_id, owner_email, widget_color, json.dumps(config, ensure_ascii=False)))
+                owner_email        = EXCLUDED.owner_email,
+                widget_color       = EXCLUDED.widget_color,
+                config             = EXCLUDED.config,
+                dashboard_password = COALESCE(clinics.dashboard_password, EXCLUDED.dashboard_password)
+        """, (clinic_id, owner_email, widget_color,
+              json.dumps(config, ensure_ascii=False), dashboard_password))
 
 
 def main():
@@ -203,8 +206,9 @@ def main():
         print(f"   Failed: {e}")
         sys.exit(1)
 
-    clinic_name = config.get("clinic_name", urlparse(url).netloc)
-    clinic_id   = generate_clinic_id(clinic_name)
+    clinic_name        = config.get("clinic_name", urlparse(url).netloc)
+    clinic_id          = generate_clinic_id(clinic_name)
+    dashboard_password = secrets.token_urlsafe(12)
 
     print("3. Clinic summary:")
     print(f"   Name:          {clinic_name}")
@@ -219,7 +223,7 @@ def main():
 
     print("4. Saving to Supabase...")
     try:
-        save_to_supabase(clinic_id, args.email, color, config)
+        save_to_supabase(clinic_id, args.email, color, config, dashboard_password)
         print("   Done\n")
     except Exception as e:
         print(f"   Failed: {e}")
@@ -230,10 +234,14 @@ def main():
     server = "https://app.vicere.co.uk"
     print("=" * 50)
     print(f"  Onboarding complete!\n")
-    print(f"  Embed code (paste before </body> on their site):")
+    print(f"  Embed code (paste before </body> on their website):")
     print(f'\n  <script src="{server}/widget.js?id={clinic_id}"></script>\n')
-    print(f"  Demo link to send the clinic:")
+    print(f"  Demo link:")
     print(f"  {server}/demo?id={clinic_id}\n")
+    print(f"  Clinic dashboard (send these credentials to the clinic):")
+    print(f"  URL:      {server}/clinic/{clinic_id}")
+    print(f"  Password: {dashboard_password}\n")
+    print("  ⚠  Save this password — it cannot be recovered from the database.")
     print("=" * 50)
 
 
