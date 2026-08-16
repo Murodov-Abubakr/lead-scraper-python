@@ -12,6 +12,12 @@ results*.csv
 stores.csv
 hiring_signals.csv
 
+# Chatbot runtime data — patient PII and analytics (never commit)
+chatbot/appointments.csv
+chatbot/analytics.json
+chatbot/analytics.json.tmp
+chatbot/credentials.json
+
 # Log files
 *.txt
 *.log
@@ -31,3 +37,8 @@ __pycache__/
 
 # WebDriver cache
 .wdm/
+
+# Dashboard dependencies
+dashboard/node_modules/
+replied.json
+owner_outreach.json
