@@ -9,10 +9,12 @@ Widget embed: <script src="http://localhost:5000/widget.js"></script>
 """
 
 import csv, json, logging, os, re, secrets, smtplib, functools, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
+from urllib.parse import urlparse as _urlparse
 from flask import Flask, request, jsonify, render_template_string, Response, session, redirect, url_for
 from dotenv import load_dotenv
+from werkzeug.security import check_password_hash
 
 _COLOR_RE    = re.compile(r'^#[0-9a-fA-F]{3,6}$')
 _SESSION_TTL = 7200  # seconds — clean up sessions idle for 2+ hours
@@ -56,6 +58,31 @@ if not _secret:
     logging.warning("SECRET_KEY not set — Flask sessions will reset on every restart")
 app.secret_key = _secret
 
+_is_prod = not bool(os.getenv("FLASK_DEBUG"))
+app.config.update(
+    SESSION_COOKIE_SECURE=_is_prod,       # HTTPS-only in prod; allow HTTP in local dev
+    SESSION_COOKIE_HTTPONLY=True,          # not accessible to JavaScript
+    SESSION_COOKIE_SAMESITE="Lax",         # blocks cross-origin CSRF
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+)
+
+# Redis-backed server-side sessions — enables real logout (stolen cookies stop working)
+_redis_url = os.getenv("REDIS_URL") or os.getenv("SESSION_REDIS_URL")
+if _redis_url:
+    try:
+        import redis as _redis_lib
+        from flask_session import Session as _FlaskSession
+        app.config["SESSION_TYPE"]       = "redis"
+        app.config["SESSION_REDIS"]      = _redis_lib.from_url(_redis_url, decode_responses=False)
+        app.config["SESSION_KEY_PREFIX"] = "vicere:"
+        app.config["SESSION_USE_SIGNER"] = True
+        _FlaskSession(app)
+        logging.info("Sessions: Redis backend active — server-side revocation enabled")
+    except ImportError:
+        logging.warning("flask-session/redis packages missing — falling back to cookie sessions")
+else:
+    logging.warning("REDIS_URL not set — sessions stored in signed cookies (server-side revocation unavailable)")
+
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 if not DASHBOARD_PASSWORD:
     raise RuntimeError(
@@ -66,16 +93,48 @@ if not DASHBOARD_PASSWORD:
 if _cors_available:
     _allowed_origins = os.getenv("CORS_ORIGINS", "").split(",")
     _allowed_origins = [o.strip() for o in _allowed_origins if o.strip()]
+    if not _allowed_origins:
+        logging.warning("CORS_ORIGINS not set — defaulting to '*'. Set CORS_ORIGINS in production.")
     CORS(app, origins=_allowed_origins if _allowed_origins else "*")
 
 if _limiter_available:
-    limiter = Limiter(get_remote_address, app=app, default_limits=[])
+    _limiter_uri = os.getenv("RATELIMIT_STORAGE_URI") or os.getenv("REDIS_URL") or "memory://"
+    if _limiter_uri == "memory://":
+        logging.warning("RATELIMIT_STORAGE_URI not set — rate limits are per-worker, not shared across Gunicorn workers")
+    limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri=_limiter_uri)
 
-APPOINTMENTS_FILE = os.path.join(os.path.dirname(__file__), "appointments.csv")
+APPOINTMENTS_FILE  = os.path.join(os.path.dirname(__file__), "appointments.csv")
 sessions: dict      = {}   # {session_key: {history, _ts}}
-_clinic_cache: dict = {}   # {clinic_id: (config_dict, fetched_at)}
+_clinic_cache: dict = {}  # {clinic_id: (config_dict, fetched_at)}
+_key_cache: dict    = {}  # {widget_key: (clinic_id, fetched_at)}
 
-_CACHE_TTL = 300  # seconds — re-fetch clinic config after 5 minutes
+_CACHE_TTL      = 300  # seconds — re-fetch clinic config after 5 minutes
+_MAX_CACHE_SIZE = 500  # evict all when exceeded to prevent memory DoS
+
+
+# ── Security helpers ───────────────────────────────────────────────────────────
+
+@app.after_request
+def _security_headers(response):
+    response.headers["X-Frame-Options"]           = "DENY"
+    response.headers["X-Content-Type-Options"]     = "nosniff"
+    response.headers["Referrer-Policy"]            = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"]         = "geolocation=(), microphone=(), camera=()"
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    return response
+
+
+def _verify_password(pwd: str, stored: str) -> bool:
+    """Constant-time password check supporting bcrypt/pbkdf2 hashes and legacy plaintext."""
+    if not stored:
+        # Still run a comparison so response time is indistinguishable from a real check
+        secrets.compare_digest(pwd.encode(), b"")
+        return False
+    if stored.startswith(("pbkdf2:", "scrypt:")):
+        return check_password_hash(stored, pwd)
+    # Legacy plaintext (backwards compat for existing clinics)
+    return secrets.compare_digest(pwd.encode(), stored.encode())
 
 
 def _get_clinic(clinic_id: str) -> dict | None:
@@ -90,18 +149,21 @@ def _get_clinic(clinic_id: str) -> dict | None:
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT config, owner_email, widget_color FROM clinics WHERE id = %s",
+                "SELECT config, owner_email, widget_color, allowed_domain FROM clinics WHERE id = %s",
                 (clinic_id,)
             )
             row = cur.fetchone()
             if not row:
                 return None
-            config, owner_email, widget_color = row
+            config, owner_email, widget_color, allowed_domain = row
             result = {
                 **(config or {}),
-                "owner_email":  owner_email  or (config or {}).get("owner_email", ""),
-                "widget_color": widget_color or (config or {}).get("widget_color", "#2563eb"),
+                "owner_email":    owner_email    or (config or {}).get("owner_email", ""),
+                "widget_color":   widget_color   or (config or {}).get("widget_color", "#2563eb"),
+                "allowed_domain": allowed_domain or "",
             }
+            if len(_clinic_cache) >= _MAX_CACHE_SIZE:
+                _clinic_cache.clear()
             _clinic_cache[clinic_id] = (result, time.time())
             return result
     except Exception as e:
@@ -109,14 +171,129 @@ def _get_clinic(clinic_id: str) -> dict | None:
         return None
 
 
-def require_password(f):
+def _get_clinic_by_key(widget_key: str) -> tuple:
+    """Resolve an unguessable widget_key → (clinic_id, cfg). Returns (None, None) on miss."""
+    if not widget_key or not DATABASE_URL:
+        return None, None
+    cached = _key_cache.get(widget_key)
+    if cached and (time.time() - cached[1]) < _CACHE_TTL:
+        clinic_id = cached[0]
+        return clinic_id, _get_clinic(clinic_id)
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM clinics WHERE widget_key = %s", (widget_key,))
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            clinic_id = row[0]
+            if len(_key_cache) >= _MAX_CACHE_SIZE:
+                _key_cache.clear()
+            _key_cache[widget_key] = (clinic_id, time.time())
+            return clinic_id, _get_clinic(clinic_id)
+    except Exception as e:
+        app.logger.error("Widget key lookup failed: %s", e)
+        return None, None
+
+
+def _origin_allowed(allowed_domain: str) -> bool:
+    """Return True if the request's Referer/Origin matches the clinic's allowed domain."""
+    if not allowed_domain:
+        return True  # no restriction configured — allow (legacy / dev)
+    for header in ("Referer", "Origin"):
+        val = request.headers.get(header, "")
+        if val:
+            host = _urlparse(val).netloc.lower().split(":")[0].lstrip("www.")
+            allowed = allowed_domain.lower().lstrip("www.")
+            if host == allowed or host.endswith("." + allowed):
+                return True
+    return False
+
+
+_ADMIN_SESSION_KEY = "vicere_admin"
+
+_ADMIN_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vicere Admin — Sign In</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#0f172a;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:#1e293b;border-radius:16px;padding:40px;
+        box-shadow:0 24px 64px rgba(0,0,0,.5);width:100%;max-width:360px;
+        border:1px solid #334155}
+  .logo{text-align:center;margin-bottom:28px}
+  .logo h1{font-size:20px;font-weight:700;color:#f1f5f9}
+  .logo p{font-size:12px;color:#475569;margin-top:6px}
+  label{display:block;font-size:11px;font-weight:600;color:#94a3b8;
+        margin-bottom:6px;letter-spacing:.06em;text-transform:uppercase}
+  input{width:100%;background:#0f172a;border:1.5px solid #334155;
+        border-radius:10px;padding:11px 14px;font-size:14px;color:#f1f5f9;
+        outline:none;transition:border-color .2s;margin-bottom:20px}
+  input:focus{border-color:#6366f1}
+  button{width:100%;background:#6366f1;color:white;border:none;
+         border-radius:10px;padding:13px;font-size:15px;font-weight:600;
+         cursor:pointer;transition:opacity .2s}
+  button:hover{opacity:.88}
+  .err{background:#450a0a;border:1px solid #7f1d1d;color:#fca5a5;
+       border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:18px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <h1>Vicere Admin</h1>
+    <p>Internal dashboard access only</p>
+  </div>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="POST" action="/admin/login">
+    <label>Admin Password</label>
+    <input type="password" name="pwd" placeholder="Dashboard password" autofocus required>
+    <button type="submit">Sign In →</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
+def require_admin(f):
+    """Session-based admin auth — replaces the old ?pwd= query-string pattern."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        pwd = request.args.get("pwd", "")
-        if pwd != DASHBOARD_PASSWORD:
-            return Response("Access denied. Add ?pwd=yourpassword to the URL.", 401)
+        if not session.get(_ADMIN_SESSION_KEY):
+            # API callers get 401 JSON; browser navigation gets a redirect
+            if request.path.startswith("/api/") or request.path == "/appointments":
+                return jsonify({"error": "Authentication required. Sign in at /admin/login"}), 401
+            return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     return decorated
+
+
+@app.route("/admin/login", methods=["GET"])
+def admin_login():
+    return render_template_string(_ADMIN_LOGIN_HTML, error="")
+
+
+@app.route("/admin/login", methods=["POST"])
+@(limiter.limit("5 per minute") if _limiter_available else lambda f: f)
+def admin_login_post():
+    pwd = request.form.get("pwd", "")
+    if not secrets.compare_digest(pwd.encode(), DASHBOARD_PASSWORD.encode()):
+        return render_template_string(_ADMIN_LOGIN_HTML, error="Incorrect password."), 401
+    session.clear()
+    session[_ADMIN_SESSION_KEY] = True
+    session.permanent = True
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop(_ADMIN_SESSION_KEY, None)
+    return redirect(url_for("admin_login"))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -266,7 +443,7 @@ def get_config():
 
 
 @app.route("/api/stats", methods=["GET"])
-@require_password
+@require_admin
 def stats_endpoint():
     try:
         return jsonify(get_stats())
@@ -279,7 +456,7 @@ def stats_endpoint():
 
 
 @app.route("/appointments", methods=["GET"])
-@require_password
+@require_admin
 def appointments():
     rows = []
     if DATABASE_URL:
@@ -311,8 +488,21 @@ def appointments():
 
 @app.route("/widget.js")
 def widget_js():
-    clinic_id    = request.args.get("id", "")[:64]
-    clinic_cfg   = _get_clinic(clinic_id) if clinic_id else None
+    widget_key = request.args.get("key", "")[:64]
+    clinic_id  = ""
+    clinic_cfg = None
+
+    if widget_key:
+        clinic_id, clinic_cfg = _get_clinic_by_key(widget_key)
+        if clinic_cfg and not _origin_allowed(clinic_cfg.get("allowed_domain", "")):
+            return Response("// Unauthorized domain", status=403, mimetype="application/javascript")
+        if not clinic_cfg:
+            return Response("// Invalid widget key", status=403, mimetype="application/javascript")
+    else:
+        # Legacy ?id= fallback (for already-deployed embeds)
+        clinic_id  = request.args.get("id", "")[:64]
+        clinic_cfg = _get_clinic(clinic_id) if clinic_id else None
+
     cfg          = clinic_cfg or {}
     clinic_name  = cfg.get("clinic_name", request.args.get("clinic", CONFIG["clinic_name"]))[:80]
     color        = _safe_color(cfg.get("widget_color", request.args.get("color", CONFIG.get("widget_color", "#2563eb"))))
@@ -335,7 +525,7 @@ def widget_js():
   const CLINIC_ID   = {js_clinic_id};
   const CLINIC_NAME = {js_clinic_name};
   const WELCOME_MSG = {js_welcome};
-  const SESSION_ID = Math.random().toString(36).substr(2, 9);
+  const SESSION_ID = Array.from(crypto.getRandomValues(new Uint8Array(9))).map(b => b.toString(36)).join('');
 
   /* ── Styles ── */
   const style = document.createElement('style');
@@ -584,13 +774,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                transition:width .4s ease; }
   .bar-count { width:32px; font-size:12px; color:#94a3b8; }
 
-  .embed-box { background:#f1f5f9; border-radius:10px; padding:16px;
-               font-family:monospace; font-size:13px; color:#334155;
-               word-break:break-all; }
-  .copy-btn { margin-top:10px; background:{{ color }}; color:white; border:none;
-              padding:8px 16px; border-radius:8px; cursor:pointer; font-size:13px; }
-  .copy-btn:hover { opacity:.85; }
-
   .appt-table { width:100%; border-collapse:collapse; font-size:13px; }
   .appt-table th { text-align:left; padding:8px 12px; border-bottom:2px solid #e2e8f0;
                    color:#64748b; font-weight:600; }
@@ -599,8 +782,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>{{ clinic_name }} — AI Chatbot</h1>
-<p class="sub">Live dashboard · Auto-refreshes every 60 seconds</p>
+<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:32px;flex-wrap:wrap;gap:12px">
+  <div>
+    <h1>{{ clinic_name }} — AI Chatbot</h1>
+    <p class="sub" style="margin-bottom:0">Live dashboard · Auto-refreshes every 60 seconds</p>
+  </div>
+  <a href="/admin/logout" style="font-size:12px;color:#64748b;text-decoration:none;padding:7px 14px;border:1px solid #e2e8f0;border-radius:8px;white-space:nowrap">Sign out</a>
+</div>
 
 <div class="cards">
   <div class="card">
@@ -631,15 +819,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="section">
-  <h2>Embed on Any Website</h2>
-  <p style="font-size:13px;color:#64748b;margin-bottom:12px;">
-    Paste this single line before &lt;/body&gt; on the clinic's website:
-  </p>
-  <div class="embed-box" id="embed_code">Loading...</div>
-  <button class="copy-btn" onclick="copyEmbed()">Copy Code</button>
-</div>
-
-<div class="section">
   <h2>Recent Appointments</h2>
   <table class="appt-table">
     <thead>
@@ -653,11 +832,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script>
 const COLOR = '{{ color }}';
-const PWD   = new URLSearchParams(window.location.search).get('pwd') || '';
 
 async function loadStats() {
   try {
-    const r    = await fetch('/api/stats?pwd=' + encodeURIComponent(PWD));
+    const r    = await fetch('/api/stats');
     const data = await r.json();
 
     document.getElementById('total_conv').textContent  = data.total_conversations;
@@ -693,7 +871,7 @@ function escHtml(str) {
 
 async function loadAppointments() {
   try {
-    const r    = await fetch('/appointments?pwd=' + encodeURIComponent(PWD));
+    const r    = await fetch('/appointments');
     const data = await r.json();
     const tbody = document.getElementById('appt_body');
     if (!data.appointments.length) {
@@ -712,24 +890,8 @@ async function loadAppointments() {
   } catch(e) { console.error(e); }
 }
 
-function loadEmbed() {
-  const origin = window.location.origin;
-  const code   = '<script src="' + origin + '/widget.js"><' + '/script>';
-  document.getElementById('embed_code').textContent = code;
-}
-
-function copyEmbed() {
-  const code = document.getElementById('embed_code').textContent;
-  navigator.clipboard.writeText(code).then(() => {
-    const btn = document.querySelector('.copy-btn');
-    btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy Code', 2000);
-  });
-}
-
 loadStats();
 loadAppointments();
-loadEmbed();
 setInterval(() => { loadStats(); loadAppointments(); }, 60000);
 </script>
 </body>
@@ -737,7 +899,7 @@ setInterval(() => { loadStats(); loadAppointments(); }, 60000);
 
 
 @app.route("/dashboard")
-@require_password
+@require_admin
 def dashboard():
     return render_template_string(
         DASHBOARD_HTML,
@@ -830,7 +992,7 @@ DEMO_HTML = """<!DOCTYPE html>
   <div class="powered">Powered by Gemini AI · Built by {{ your_name }}</div>
 </div>
 <script>
-const SID = Math.random().toString(36).substr(2,9);
+const SID = Array.from(crypto.getRandomValues(new Uint8Array(9))).map(b=>b.toString(36)).join('');
 function ts() { return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
 function addMsg(t,w) {
   const m=document.getElementById('msgs'), d=document.createElement('div');
@@ -885,6 +1047,126 @@ def demo():
         your_name=os.getenv("YOUR_NAME", "Vicere"),
         phone=phone,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CENTRAL LOGIN  (app.vicere.co.uk/login — email + password)
+# ═══════════════════════════════════════════════════════════════════
+
+_CENTRAL_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vicere — Sign In</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#0f172a;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:#1e293b;border-radius:20px;padding:44px 40px;
+        box-shadow:0 24px 64px rgba(0,0,0,.5);width:100%;max-width:400px;
+        border:1px solid #334155}
+  .logo{text-align:center;margin-bottom:32px}
+  .logo-mark{display:inline-flex;align-items:center;justify-content:center;
+             width:52px;height:52px;border-radius:14px;
+             background:linear-gradient(135deg,#6366f1,#8b5cf6);
+             font-size:24px;margin-bottom:14px;box-shadow:0 8px 24px rgba(99,102,241,.35)}
+  .logo h1{font-size:22px;font-weight:700;color:#f1f5f9;letter-spacing:-.02em}
+  .logo p{font-size:13px;color:#64748b;margin-top:5px}
+  .field{margin-bottom:18px}
+  label{display:block;font-size:11px;font-weight:600;color:#94a3b8;
+        margin-bottom:7px;letter-spacing:.06em;text-transform:uppercase}
+  input{width:100%;background:#0f172a;border:1.5px solid #334155;
+        border-radius:10px;padding:12px 14px;font-size:14px;color:#f1f5f9;
+        outline:none;transition:border-color .2s}
+  input::placeholder{color:#475569}
+  input:focus{border-color:#6366f1}
+  button{width:100%;background:linear-gradient(135deg,#6366f1,#8b5cf6);
+         color:white;border:none;border-radius:10px;padding:14px;
+         font-size:15px;font-weight:600;cursor:pointer;
+         transition:opacity .2s;margin-top:6px;
+         box-shadow:0 4px 14px rgba(99,102,241,.4)}
+  button:hover{opacity:.88}
+  .err{background:#450a0a;border:1px solid #7f1d1d;color:#fca5a5;
+       border-radius:8px;padding:11px 14px;font-size:13px;margin-bottom:18px}
+  .footer{text-align:center;margin-top:24px;font-size:12px;color:#475569}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="logo-mark">🦷</div>
+    <h1>Vicere</h1>
+    <p>Clinic Dashboard Portal</p>
+  </div>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="POST" action="/login">
+    <div class="field">
+      <label>Email Address</label>
+      <input type="email" name="email" placeholder="owner@yourclinic.co.uk"
+             value="{{ email }}" autofocus required>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" name="pwd" placeholder="Your dashboard password" required>
+    </div>
+    <button type="submit">Sign In →</button>
+  </form>
+  <div class="footer">Powered by Vicere AI · Dental Chatbot Platform</div>
+</div>
+</body>
+</html>"""
+
+
+@app.route("/login", methods=["GET"])
+def central_login():
+    return render_template_string(_CENTRAL_LOGIN_HTML, error="", email="")
+
+
+@app.route("/login", methods=["POST"])
+@(limiter.limit("5 per minute") if _limiter_available else lambda f: f)
+def central_login_post():
+    email = request.form.get("email", "").strip().lower()[:254]
+    pwd   = request.form.get("pwd", "")
+
+    def _fail():
+        return render_template_string(
+            _CENTRAL_LOGIN_HTML,
+            error="Invalid email or password.",
+            email=email,
+        ), 401
+
+    if not email or not pwd:
+        return _fail()
+
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, dashboard_password FROM clinics WHERE lower(owner_email) = %s LIMIT 1",
+                (email,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        app.logger.error("Central login DB error: %s", e)
+        return render_template_string(
+            _CENTRAL_LOGIN_HTML,
+            error="A server error occurred. Please try again.",
+            email=email,
+        ), 500
+
+    clinic_id  = row[0] if row else None
+    stored_pwd = row[1] if row else ""
+    # Always verify to prevent email enumeration via response-time side-channel
+    valid = _verify_password(pwd, stored_pwd)
+    if not clinic_id or not valid:
+        return _fail()
+
+    session.clear()  # prevent session fixation
+    session["clinic_id"] = clinic_id
+    session.permanent = True
+    return redirect(url_for("clinic_dashboard", clinic_id=clinic_id))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -988,11 +1270,6 @@ _CLINIC_DASHBOARD_HTML = """<!DOCTYPE html>
              padding:2px 7px;border-radius:20px;font-weight:600}
   .ts{color:#94a3b8}
 
-  .embed-box{background:#f1f5f9;border-radius:8px;padding:14px;
-             font-family:monospace;font-size:12px;color:#334155;
-             word-break:break-all;margin-top:8px}
-  .copy-btn{margin-top:10px;background:{{ color }};color:white;border:none;
-            padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
 </style>
 </head>
 <body>
@@ -1033,15 +1310,6 @@ _CLINIC_DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="section">
   <h2>Activity by Hour</h2>
   <div id="chart"></div>
-</div>
-
-<div class="section">
-  <h2>Your Embed Code</h2>
-  <p style="font-size:13px;color:#64748b">
-    Paste this line before &lt;/body&gt; on your website to activate the chatbot:
-  </p>
-  <div class="embed-box" id="embed_code">Loading…</div>
-  <button class="copy-btn" onclick="copyEmbed()">Copy Code</button>
 </div>
 
 <div class="section">
@@ -1089,16 +1357,7 @@ async function loadAppts(){
       <td class="ts">${esc(a.timestamp)}</td></tr>`).join('');
   }catch(e){console.error(e);}
 }
-function loadEmbed(){
-  const code='<script src="'+window.location.origin+'/widget.js?id='+CID+'"><\\/script>';
-  document.getElementById('embed_code').textContent=code;
-}
-function copyEmbed(){
-  navigator.clipboard.writeText(document.getElementById('embed_code').textContent)
-    .then(()=>{const b=document.querySelector('.copy-btn');
-      b.textContent='Copied!';setTimeout(()=>b.textContent='Copy Code',2000);});
-}
-loadStats();loadAppts();loadEmbed();
+loadStats();loadAppts();
 setInterval(()=>{loadStats();loadAppts();},60000);
 </script>
 </body>
@@ -1110,7 +1369,7 @@ def _clinic_auth_required(f):
     @functools.wraps(f)
     def decorated(clinic_id, *args, **kwargs):
         if session.get("clinic_id") != clinic_id:
-            return redirect(url_for("clinic_login", clinic_id=clinic_id))
+            return redirect(url_for("central_login"))
         return f(clinic_id, *args, **kwargs)
     return decorated
 
@@ -1125,42 +1384,34 @@ def _get_clinic_or_404(clinic_id: str):
 @app.route("/clinic/<clinic_id>", methods=["GET"])
 def clinic_login(clinic_id):
     clinic_id = clinic_id[:64]
-    cfg = _get_clinic_or_404(clinic_id)
-    if not cfg:
-        return Response("Clinic not found.", 404)
-    color = _safe_color(cfg.get("widget_color", "#2563eb"))
-    return render_template_string(
-        _CLINIC_LOGIN_HTML,
-        clinic_id=clinic_id,
-        clinic_name=cfg.get("clinic_name", clinic_id),
-        color=color,
-        error="",
-    )
+    if session.get("clinic_id") == clinic_id:
+        return redirect(url_for("clinic_dashboard", clinic_id=clinic_id))
+    return redirect(url_for("central_login"))
 
 
 @app.route("/clinic/<clinic_id>/auth", methods=["POST"])
+@(limiter.limit("5 per minute") if _limiter_available else lambda f: f)
 def clinic_auth(clinic_id):
     clinic_id = clinic_id[:64]
     cfg = _get_clinic_or_404(clinic_id)
     if not cfg:
         return Response("Clinic not found.", 404)
 
-    pwd = request.form.get("pwd", "")
+    pwd   = request.form.get("pwd", "")
     color = _safe_color(cfg.get("widget_color", "#2563eb"))
 
-    # Fetch stored password from DB
-    stored_pwd = None
+    stored_pwd = ""
     try:
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT dashboard_password FROM clinics WHERE id = %s", (clinic_id,))
             row = cur.fetchone()
             if row:
-                stored_pwd = row[0]
+                stored_pwd = row[0] or ""
     except Exception as e:
         app.logger.error("Clinic auth DB error: %s", e)
 
-    if not stored_pwd or not secrets.compare_digest(pwd, stored_pwd):
+    if not _verify_password(pwd, stored_pwd):
         return render_template_string(
             _CLINIC_LOGIN_HTML,
             clinic_id=clinic_id,
@@ -1169,6 +1420,7 @@ def clinic_auth(clinic_id):
             error="Incorrect password. Please try again.",
         )
 
+    session.clear()  # prevent session fixation
     session["clinic_id"] = clinic_id
     session.permanent = True
     return redirect(url_for("clinic_dashboard", clinic_id=clinic_id))
@@ -1221,7 +1473,7 @@ def clinic_appointments(clinic_id):
 @app.route("/clinic/<clinic_id>/logout")
 def clinic_logout(clinic_id):
     session.pop("clinic_id", None)
-    return redirect(url_for("clinic_login", clinic_id=clinic_id[:64]))
+    return redirect(url_for("central_login"))
 
 
 # ═══════════════════════════════════════════════════════════════════
