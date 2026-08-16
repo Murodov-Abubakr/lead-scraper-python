@@ -35,14 +35,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Gemini client (optional — falls back to templates if key missing) ──
-_gemini_client = None
+# ── Groq client (optional — falls back to templates if key missing) ──
+_groq_client = None
 try:
-    from google import genai
-    from google.genai import types as _genai_types
-    _gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if _gemini_api_key:
-        _gemini_client = genai.Client(api_key=_gemini_api_key)
+    from groq import Groq as _Groq
+    _groq_key = os.getenv("GROQ_API_KEY")
+    if _groq_key:
+        _groq_client = _Groq(api_key=_groq_key)
 except ImportError:
     pass
 
@@ -451,8 +450,8 @@ def _readable_problems(problems):
 
 
 def _generate_email_ai(lead) -> tuple[str, str] | None:
-    """Ask Gemini to write a unique cold email. Returns (subject, body) or None on failure."""
-    if not _gemini_client:
+    """Ask Groq (Llama 3) to write a unique cold email. Returns (subject, body) or None on failure."""
+    if not _groq_client:
         return None
 
     name     = lead["business_name"]
@@ -483,19 +482,20 @@ Write a short, direct cold email. Rules:
 - Body: exactly 4-5 sentences, no more
 - Mention 1 or 2 of the specific problems listed above (the worst ones)
 - One clear call to action — ask for a reply, not a call
-- No "I hope this finds you well", no "I wanted to reach out", no em dashes overuse
+- No "I hope this finds you well", no "I wanted to reach out", no excessive em dashes
 - Sound like a real person, not a marketing department
 - Sign off: just "{YOUR_NAME}" on its own line
 
 Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
 
-    resp = _gemini_client.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=prompt,
-        config=_genai_types.GenerateContentConfig(max_output_tokens=400, temperature=0.9),
+    resp = _groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=400,
+        temperature=0.9,
+        response_format={"type": "json_object"},
     )
-    raw = resp.text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    data = json.loads(raw)
+    data    = json.loads(resp.choices[0].message.content)
     subject = data.get("subject", "").strip()
     body    = data.get("body", "").strip()
     if subject and body:
@@ -593,8 +593,8 @@ def _rank_email(addr: str) -> int:
 
 
 def _ai_pick_contact_pages(homepage_html: str, links: list, base_url: str) -> list[str]:
-    """Ask Gemini which pages are most likely to have a contact email."""
-    if not _gemini_client or not links:
+    """Ask Groq (Llama 3) which pages are most likely to have a contact email."""
+    if not _groq_client or not links:
         return []
     link_list = "\n".join(
         f'{i+1}. [{l["text"] or ""}] {l["url"]}'
@@ -611,13 +611,20 @@ Think: About Us, Our Team, Meet the Doctor, Contact, Staff, Appointment pages.
 Return ONLY a JSON array of the URLs: ["url1", "url2", "url3"]"""
 
     try:
-        resp = _gemini_client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=prompt,
-            config=_genai_types.GenerateContentConfig(max_output_tokens=200),
+        resp = _groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.1,
+            response_format={"type": "json_object"},
         )
-        raw = resp.text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        chosen = json.loads(raw)
+        raw    = resp.choices[0].message.content
+        parsed = json.loads(raw)
+        # Groq may return {"urls": [...]} or just [...] wrapped in an object
+        if isinstance(parsed, list):
+            chosen = parsed
+        else:
+            chosen = next((v for v in parsed.values() if isinstance(v, list)), [])
         return [u for u in chosen if isinstance(u, str)][:3]
     except Exception:
         return []
