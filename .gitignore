@@ -18,9 +18,10 @@ chatbot/analytics.json
 chatbot/analytics.json.tmp
 chatbot/credentials.json
 
-# Log files
-*.txt
+# Log files (but not requirements files)
 *.log
+outreach_log.txt
+!requirements*.txt
 
 # Screenshots folder (large files)
 screenshots/
